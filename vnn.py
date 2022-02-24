@@ -14,15 +14,16 @@ classifier.fit(data, labels, batch_size=100, steps=1000)
 classifier.evaluate(test_data, test_labels)
 
 # TODO: add Bias
+# TODO: change to be SGD only (naming, constants)
 """
+import copy
+import numdifftools as nd  # stackoverflow.com/questions/65745683/how-to-install-scipy-on-apple-silicon-arm-m1
 import numpy as np
 from numpy.typing import NDArray
-from typing import List
+from typing import List, Callable
 
-from abstractions import ModelData, ModelLabel
-from constants import (
-    OPTIMIZER_SGD, EDGE_DEFAULT_WEIGHT,
-)
+from abstractions import ModelData, ModelDataSingle, ModelLabels
+from constants import OPTIMIZER_SGD, EDGE_DEFAULT_WEIGHT, LEARNING_RATE
 from utils import sigmoid, mean_squared_error
 
 
@@ -55,11 +56,13 @@ class Edge:
 
 class Layer:
     def __init__(self, num_of_perceptrons: int):
-        self.perceptrons = [Perceptron()] * num_of_perceptrons
+        self.perceptrons = [Perceptron() for _ in range(num_of_perceptrons)]
         # self.bias = None
-
     # def add_bias(self):
     #     self.bias = BiasNode()
+
+    def __len__(self):
+        return len(self.perceptrons)
 
     def connect_to_next(self, layer):
         """
@@ -68,23 +71,34 @@ class Layer:
         """
         raise NotImplementedError
 
+    @property
+    def weights(self):
+        return [e.weight for p in self.perceptrons for e in p.outbound_edges]
+
+    def set_weights(self, weights):
+        i = 0
+        for p in self.perceptrons:
+            for edge in p.outbound_edges:
+                edge.weight = weights[i]
+                i += 1
+
     def refresh_values(self):
         """
         update layer's perceptrons value
         """
         [p.refresh_value() for p in self.perceptrons]
 
-    def set_layer_data(self, data: NDArray[float]):
+    def set_layer_data(self, first_layer_data: ModelDataSingle):
         """
         change whole layer's data (useful for input layers)
-        :param data: array of data values
+        :param first_layer_data: array of data values
         """
-        if len(data) != len(self.perceptrons):
-            raise ValueError(f"data length ({len(data)}) and layer's "
+        if len(first_layer_data) != len(self.perceptrons):
+            raise ValueError(f"data length ({len(first_layer_data)}) and layer's "
                              f"perceptrons number ({len(self.perceptrons)}) "
                              f"do not match")
         for i in range(len(self.perceptrons)):
-            self.perceptrons[i].activation_value = data[i]
+            self.perceptrons[i].activation_value = first_layer_data[i]
 
     def values(self):
         """
@@ -129,7 +143,7 @@ class SequentialModel:
             self.layers[i].connect_to_next(self.layers[i + 1])
 
     @staticmethod
-    def _split_to_batches(data: ModelData, labels: ModelLabel, batch_size: int):
+    def _split_to_batches(data: ModelData, labels: ModelLabels, batch_size: int):
         """
         generator that splits the data & labels to batches, based on batch_size
         :param data: model's input data
@@ -142,7 +156,46 @@ class SequentialModel:
             yield data[i: i + batch_size], labels[i: i + batch_size]
             i += batch_size
 
-    def fit(self, data: ModelData, labels: ModelLabel,
+    def _set_weights(self, weights):
+        i = 0
+        for layer in self.layers:
+            layer_weights_len = len(layer.weights)
+            layer.set_weights(weights[i: i + layer_weights_len])
+            i += layer_weights_len
+
+    @property
+    def _weights(self):
+        # TODO: consider removal
+        weights = []
+        for layer in self.layers:
+            weights.extend(layer.weights)
+        return weights
+
+    def _create_batch_function(self, data: ModelData, labels: ModelLabels) -> Callable:
+        """
+        :param data: x input
+        :param labels: y output
+        :return: the total loss function for the batch
+        """
+        model_copy = copy.deepcopy(self)
+
+        def batch_function(weights):
+            model_copy._set_weights(weights)
+
+            loss_sum = 0
+            total_loss_items = 0
+            for i, input_layer_data in enumerate(data):
+                model_copy._propagate_forward(input_layer_data)
+
+                for j, activation_val in enumerate(model_copy.layers[-1].values()):
+                    loss_sum += model_copy.loss_function(activation_val, labels[i][j])
+                    total_loss_items += 1
+
+            return loss_sum / total_loss_items
+
+        return batch_function
+
+    def fit(self, data: ModelData, labels: ModelLabels,
             epochs: int, batch_size: int = 1):
         """
         :param data: input layer's data
@@ -156,12 +209,25 @@ class SequentialModel:
 
         for _ in range(epochs):
             for batch_data, batch_labels in self._split_to_batches(data, labels, batch_size):
-                pass
-                # self.layers[0].set_layer_data(data[0]) # TODO: consider removal/fix
-                # for each data input, create the relevant function full loss function
-                # avg all of them into a new function
-                # get gradient descent vector
-                # adjust the weights accordingly, using the LEARNING_RATE
+                batch_func: Callable = self._create_batch_function(batch_data, batch_labels)
+                weights = self._weights
+                gradient = nd.Gradient(batch_func)(weights)
+
+                updated_weights = []
+                for i in range(len(weights)):
+                    updated_weights.append(weights[i] - LEARNING_RATE * gradient[i])
+
+                self._set_weights(updated_weights)
+
+    def _propagate_forward(self, input_layer_data: ModelDataSingle) -> None:
+        """
+        propagate model forward based on input for the first layer
+        :param input_layer_data: first layer input
+        """
+        first_layer, other_layers = self.layers[0], self.layers[1:]
+        first_layer.set_layer_data(input_layer_data)
+        for layer in other_layers:
+            layer.refresh_values()
 
     def predict(self, data: ModelData) -> NDArray:
         """
@@ -171,12 +237,8 @@ class SequentialModel:
         """
         predictions = []
 
-        first_layer, other_layers = self.layers[0], self.layers[1:]
-        for model_input in data:
-            first_layer.set_layer_data(model_input)
-            for layer in other_layers:
-                layer.refresh_values()
-
+        for input_layer_data in data:
+            self._propagate_forward(input_layer_data)
             predictions.append(self.layers[-1].values())
 
         return np.array(predictions)
@@ -201,6 +263,8 @@ if __name__ == "__main__":
 
     model = SequentialModel(layers)
     model.compile()
-    model.fit(np.array(training_data), np.array(training_labels), epochs=5, batch_size=2)
+    model.fit(np.array(training_data), np.array(training_labels), batch_size=4, epochs=10)
     res = model.predict(np.array(test_data))
-    print(res)
+    print(res)  # expected: [0, 1]
+
+# divide by 2? bias? other computation issue?
