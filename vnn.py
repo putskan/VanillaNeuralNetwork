@@ -1,21 +1,3 @@
-
-"""
-https://www.tensorflow.org/tutorials/quickstart/beginner
-
-model = tf.keras.models.Sequential([
-  tf.keras.layers.Flatten(input_shape=(28, 28)),
-  tf.keras.layers.Dense(128, activation='relu'),
-  tf.keras.layers.Dropout(0.2),
-  tf.keras.layers.Dense(10)
-])
-
-classifier.fit(data, labels, batch_size=100, steps=1000)
-
-classifier.evaluate(test_data, test_labels)
-
-# TODO: add Bias
-# TODO: change to be SGD only (naming, constants)
-"""
 import copy
 import numdifftools as nd  # stackoverflow.com/questions/65745683/how-to-install-scipy-on-apple-silicon-arm-m1
 import numpy as np
@@ -23,7 +5,7 @@ from numpy.typing import NDArray
 from typing import List, Callable
 
 from abstractions import ModelData, ModelDataSingle, ModelLabels
-from constants import OPTIMIZER_SGD, EDGE_DEFAULT_WEIGHT, LEARNING_RATE
+from constants import EDGE_DEFAULT_WEIGHT, LEARNING_RATE
 from utils import sigmoid, mean_squared_error
 
 
@@ -33,18 +15,16 @@ class Perceptron:
         self.activation_function = activation_function
         self.inbound_edges = inbound_edges or []
         self.outbound_edges = outbound_edges or []
-        # TODO: check if the correct terminology
         self.activation_value = None
 
     def refresh_value(self):
         """
         update value based on weighted sum of inbound edges & perceptrons
-        :return:
         """
-        weighted_avg = sum([e.weight * e.src_perceptron.activation_value
-                           for e in self.inbound_edges]) / len(self.inbound_edges)
+        weighted_sum = sum([e.weight * e.src_perceptron.activation_value
+                           for e in self.inbound_edges])
 
-        self.activation_value = self.activation_function(weighted_avg)
+        self.activation_value = self.activation_function(weighted_sum)
 
 
 class Edge:
@@ -57,9 +37,6 @@ class Edge:
 class Layer:
     def __init__(self, num_of_perceptrons: int):
         self.perceptrons = [Perceptron() for _ in range(num_of_perceptrons)]
-        # self.bias = None
-    # def add_bias(self):
-    #     self.bias = BiasNode()
 
     def __len__(self):
         return len(self.perceptrons)
@@ -113,8 +90,6 @@ class DenseLayer(Layer):
         connect layer to next layer (create all possible edges - DENSE)
         :param layer: Layer object
         """
-        # self_perceptrons = self.perceptrons + [self.bias] \
-        #     if self.bias else self.perceptrons
         for src_perceptron in self.perceptrons:
             for dst_perceptron in layer.perceptrons:
                 e = Edge(src_perceptron, dst_perceptron)
@@ -122,17 +97,46 @@ class DenseLayer(Layer):
                 dst_perceptron.inbound_edges.append(e)
 
 
-class SequentialModel:
-    def __init__(self, layers: List[Layer]):  # TODO: check how to add abstraction of inheriting classes
-        self.optimizer = None
+class DenseInputLayer(Layer):
+    def __init__(self, num_of_perceptrons: int):
+        super().__init__(num_of_perceptrons)
+        self.bias = Perceptron()
+        self.bias.activation_value = 1
+
+    def __len__(self):
+        return super().__len__() + 1
+
+    @property
+    def weights(self):
+        return [e.weight for p in [self.bias] + self.perceptrons for e in p.outbound_edges]
+
+    def set_weights(self, weights):
+        i = 0
+        for p in [self.bias] + self.perceptrons:
+            for edge in p.outbound_edges:
+                edge.weight = weights[i]
+                i += 1
+
+    def connect_to_next(self, layer):
+        """
+        connect layer to next layer (create all possible edges - DENSE)
+        :param layer: Layer object
+        """
+        for src_perceptron in [self.bias] + self.perceptrons:
+            for dst_perceptron in layer.perceptrons:
+                e = Edge(src_perceptron, dst_perceptron)
+                src_perceptron.outbound_edges.append(e)
+                dst_perceptron.inbound_edges.append(e)
+
+
+class SequentialModelSGD:
+    def __init__(self, layers: List[Layer]):
         self.loss_function = None
         self.layers = layers
-        # self.layers[0].add_bias()
         self._connect_layers()
 
-    def compile(self, optimizer=OPTIMIZER_SGD,
+    def compile(self,
                 loss_function=mean_squared_error):
-        self.optimizer = optimizer
         self.loss_function = loss_function
 
     def _connect_layers(self):
@@ -165,7 +169,6 @@ class SequentialModel:
 
     @property
     def _weights(self):
-        # TODO: consider removal
         weights = []
         for layer in self.layers:
             weights.extend(layer.weights)
@@ -198,6 +201,9 @@ class SequentialModel:
     def fit(self, data: ModelData, labels: ModelLabels,
             epochs: int, batch_size: int = 1):
         """
+        train model based on SGD
+        https://en.wikipedia.org/wiki/Stochastic_gradient_descent
+
         :param data: input layer's data
         :param labels: expected output/result
         :param batch_size: chunk size to split the data to
@@ -247,7 +253,7 @@ class SequentialModel:
 if __name__ == "__main__":
     # simulate & predict the AND bitwise operator function
     layers = [
-        DenseLayer(2),
+        DenseInputLayer(2),
         DenseLayer(1),
     ]
     training_data = [
@@ -261,10 +267,8 @@ if __name__ == "__main__":
         [0, 1], [1, 1]
     ]
 
-    model = SequentialModel(layers)
+    model = SequentialModelSGD(layers)
     model.compile()
-    model.fit(np.array(training_data), np.array(training_labels), batch_size=4, epochs=10)
+    model.fit(np.array(training_data), np.array(training_labels), batch_size=4, epochs=50000)
     res = model.predict(np.array(test_data))
     print(res)  # expected: [0, 1]
-
-# divide by 2? bias? other computation issue?
